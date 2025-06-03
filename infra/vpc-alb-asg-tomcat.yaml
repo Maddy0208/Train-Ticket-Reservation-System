@@ -1,1 +1,348 @@
+AWSTemplateFormatVersion: '2010-09-09'
 
+Description: VPC with ALB and ASG with Java 17, Maven, Git, and Tomcat with WAR deployment
+ 
+Parameters:
+
+  KeyName:
+
+    Type: AWS::EC2::KeyPair::KeyName
+
+    Description: Key pair for EC2 instances
+ 
+Resources:
+
+  VPC:
+
+    Type: AWS::EC2::VPC
+
+    Properties:
+
+      CidrBlock: 10.0.0.0/16
+
+      EnableDnsSupport: true
+
+      EnableDnsHostnames: true
+
+      Tags:
+
+        - Key: Name
+
+          Value: MyVPC
+ 
+  InternetGateway:
+
+    Type: AWS::EC2::InternetGateway
+ 
+  AttachGateway:
+
+    Type: AWS::EC2::VPCGatewayAttachment
+
+    Properties:
+
+      VpcId: !Ref VPC
+
+      InternetGatewayId: !Ref InternetGateway
+ 
+  PublicSubnet1:
+
+    Type: AWS::EC2::Subnet
+
+    Properties:
+
+      VpcId: !Ref VPC
+
+      CidrBlock: 10.0.1.0/24
+
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+
+      MapPublicIpOnLaunch: true
+
+      Tags:
+
+        - Key: Name
+
+          Value: PublicSubnet1
+ 
+  PublicSubnet2:
+
+    Type: AWS::EC2::Subnet
+
+    Properties:
+
+      VpcId: !Ref VPC
+
+      CidrBlock: 10.0.2.0/24
+
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+
+      MapPublicIpOnLaunch: true
+
+      Tags:
+
+        - Key: Name
+
+          Value: PublicSubnet2
+ 
+  RouteTable:
+
+    Type: AWS::EC2::RouteTable
+
+    Properties:
+
+      VpcId: !Ref VPC
+ 
+  PublicRoute:
+
+    Type: AWS::EC2::Route
+
+    Properties:
+
+      RouteTableId: !Ref RouteTable
+
+      DestinationCidrBlock: 0.0.0.0/0
+
+      GatewayId: !Ref InternetGateway
+ 
+  SubnetRouteTableAssoc1:
+
+    Type: AWS::EC2::SubnetRouteTableAssociation
+
+    Properties:
+
+      SubnetId: !Ref PublicSubnet1
+
+      RouteTableId: !Ref RouteTable
+ 
+  SubnetRouteTableAssoc2:
+
+    Type: AWS::EC2::SubnetRouteTableAssociation
+
+    Properties:
+
+      SubnetId: !Ref PublicSubnet2
+
+      RouteTableId: !Ref RouteTable
+ 
+  InstanceSecurityGroup:
+
+    Type: AWS::EC2::SecurityGroup
+
+    Properties:
+
+      GroupDescription: Allow SSH, HTTP, HTTPS, and Tomcat HTTP (8080)
+
+      VpcId: !Ref VPC
+
+      SecurityGroupIngress:
+
+        - IpProtocol: tcp
+
+          FromPort: 22
+
+          ToPort: 22
+
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+
+          FromPort: 8080
+
+          ToPort: 8080
+
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+
+          FromPort: 80
+
+          ToPort: 80
+
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+
+          FromPort: 443
+
+          ToPort: 443
+
+          CidrIp: 0.0.0.0/0
+ 
+  LaunchTemplate:
+
+    Type: AWS::EC2::LaunchTemplate
+
+    Properties:
+
+      LaunchTemplateData:
+
+        InstanceType: t2.micro
+
+        KeyName: !Ref KeyName
+
+        ImageId: ami-084568db4383264d4  # Ubuntu 22.04
+
+        SecurityGroupIds:
+
+          - !Ref InstanceSecurityGroup
+
+        UserData:
+
+          Fn::Base64: !Sub |
+
+            #!/bin/bash
+
+            apt-get update -y
+
+            apt-get install -y git maven openjdk-17-jdk curl
+ 
+            useradd -m -U -d /opt/tomcat -s /bin/false tomcat
+ 
+            wget https://dlcdn.apache.org/tomcat/tomcat-11/v11.0.7/bin/apache-tomcat-11.0.7.tar.gz -P /tmp
+
+            tar -xzvf /tmp/apache-tomcat-11.0.7.tar.gz -C /opt/tomcat
+
+            rm -f /tmp/apache-tomcat-11.0.7.tar.gz
+ 
+            chown -R tomcat: /opt/tomcat
+
+            chmod +x /opt/tomcat/apache-tomcat-11.0.7/bin/*.sh
+ 
+            cat <<'EOF' > /etc/systemd/system/tomcat.service
+
+            [Unit]
+
+            Description=Apache Tomcat 11
+
+            After=network.target
+ 
+            [Service]
+
+            Type=forking
+
+            User=tomcat
+
+            Group=tomcat
+
+            Environment="JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"
+
+            Environment="CATALINA_HOME=/opt/tomcat/apache-tomcat-11.0.7"
+
+            ExecStart=/opt/tomcat/apache-tomcat-11.0.7/bin/startup.sh
+
+            ExecStop=/opt/tomcat/apache-tomcat-11.0.7/bin/shutdown.sh
+
+            Restart=on-failure
+ 
+            [Install]
+
+            WantedBy=multi-user.target
+
+            EOF
+ 
+            systemctl daemon-reload
+
+            systemctl enable tomcat
+ 
+            curl -u admin:password -o /opt/tomcat/apache-tomcat-11.0.7/webapps/TrainBook-1.0.0-SNAPSHOT.war http://44.201.75.195:8081/artifactory/libs-snapshot-local/TrainBook-1.0.0-SNAPSHOT.war
+
+            chown tomcat: /opt/tomcat/apache-tomcat-11.0.7/webapps/TrainBook-1.0.0-SNAPSHOT.war
+ 
+            systemctl start tomcat
+ 
+  AutoScalingGroup:
+
+    Type: AWS::AutoScaling::AutoScalingGroup
+
+    Properties:
+
+      VPCZoneIdentifier:
+
+        - !Ref PublicSubnet1
+
+        - !Ref PublicSubnet2
+
+      LaunchTemplate:
+
+        LaunchTemplateId: !Ref LaunchTemplate
+
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+      MinSize: '1'
+
+      MaxSize: '2'
+
+      DesiredCapacity: '1'
+
+      TargetGroupARNs:
+
+        - !Ref TargetGroup
+ 
+  LoadBalancer:
+
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+
+    Properties:
+
+      Name: MyALB
+
+      Subnets:
+
+        - !Ref PublicSubnet1
+
+        - !Ref PublicSubnet2
+
+      SecurityGroups:
+
+        - !Ref InstanceSecurityGroup
+
+      Scheme: internet-facing
+
+      Type: application
+
+      IpAddressType: ipv4
+ 
+  TargetGroup:
+
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+
+    Properties:
+
+      VpcId: !Ref VPC
+
+      Port: 8080
+
+      Protocol: HTTP
+
+      TargetType: instance
+
+      HealthCheckPath: /
+
+      HealthCheckPort: traffic-port
+ 
+  Listener:
+
+    Type: AWS::ElasticLoadBalancingV2::Listener
+
+    Properties:
+
+      DefaultActions:
+
+        - Type: forward
+
+          TargetGroupArn: !Ref TargetGroup
+
+      LoadBalancerArn: !Ref LoadBalancer
+
+      Port: 80
+
+      Protocol: HTTP
+ 
+Outputs:
+
+  LoadBalancerDNS:
+
+    Description: DNS Name of the ALB
+
+    Value: !GetAtt LoadBalancer.DNSName
+ 
